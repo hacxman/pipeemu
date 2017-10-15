@@ -1,0 +1,263 @@
+#!/usr/bin/python2.7
+import sys
+import os
+from time import sleep
+from collections import namedtuple
+
+MEMSIZE = 1024 * 1024 * 1
+
+#def namedkokot(pica, rit):
+#    rit = rit.split(' ')
+#    wololo = dict([ (dz, 0) for dz in rit])
+#    print wololo
+
+class Regfile(object):
+    def __init__(self, *k):
+        self.regnames = 'r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 r16 r17 r18 r19 r20 r21 r22 r23 r24 r25 r26 fr sp lr pc zero'.split(' ')
+        self.r = dict([ (dz, 0) for dz in self.regnames])
+
+    def __getitem__(self, i):
+        if type(i) is int:
+            return self.r[self.regnames[i]]
+        else:
+            return self.r[i]
+
+    def __setitem__(self, i, v):
+        if type(i) is int:
+            self.r[self.regnames[i]] = v
+#            self.r[self.r.keys()[i]] = v
+        else:
+            self.r[i] = v
+
+    def __repr__(self):
+        return '{'+','.join(["'"+rn+"': " + hex(self.r[rn]) for rn in  self.regnames])+'}'
+
+class CPU(object):
+    def __init__(self, mmu):
+        self.mmu = mmu
+        mmu.add_cpu(self)
+        self.regs = Regfile()
+
+        self.ops = {0b000: self.sub_i,
+                    0b001: self.mov_i,
+                    0b010: self.br_i,
+                    0b011: self.ld_i,
+                    0b100: self.st_i,
+                    0b101: self.shl_i,
+                    0b110: self.rot_i,
+                    0b111: self.nor_i}
+
+    def fetch_instruction(self, addr):
+        return self.mmu.read(addr, 2)
+
+    def sub_i(self, r1, r2, imm):
+#        print 'sub', r1, r2
+        self.regs['pc'] += 2
+        self.regs[r1] -= self.regs[r2]
+        if self.regs[r1] < 0:
+            self.regs['fr'] = self.regs['fr'] | 0b1
+        else:
+            self.regs['fr'] = self.regs['fr'] & 0xfffffffe
+
+
+    def mov_i(self, r1, r2, imm):
+        # TODO: make register name <-> id lookup function
+        self.regs['pc'] += 2
+        self.regs[r1] = imm
+
+    def br_i(self, r1, r2, imm):
+        self.regs['lr'] = self.regs['pc']
+        self.regs['pc'] = self.regs[r1]
+        print 'branching to', self.regs['pc']
+
+    def ld_i(self, r1, r2, imm):
+        self.regs['pc'] += 2
+        self.regs[r1] = reduce(lambda a,b: (a << 8) | b, self.mmu.read(self.regs[r2], 4))
+
+    def st_i(self, r1, r2, imm):
+#        print 'ST', hex(self.regs[r1])
+        self.regs['pc'] += 2
+        self.mmu.write32(self.regs[r1], self.regs[r2] )
+
+    def shl_i(self, r1, r2, imm):
+        self.regs['pc'] += 2
+        self.regs[r1] = (self.regs[r1] << self.regs[r2]) & 0xffffffff
+
+    def rot_i(self, r1, r2, imm):
+        self.regs['pc'] += 2
+        # FIXME
+        self.regs[r1] = (self.regs[r1] << self.regs[r2]) & 0xffffffff
+
+    def nor_i(self, r1, r2, imm):
+        self.regs['pc'] += 2
+        self.regs[r1] = (~(self.regs[r1] | self.regs[r2])) & 0xffffffff
+
+    def execute_instruction(self, i):
+        opcode = (i[1] & 0b01110000) >> 4;
+        cond = (i[1] & 0b10000000) >> 7;
+
+        r1 = ((i[1] & 0b1111) << 1) | ((i[0] & 0b10000000) >> 7)
+        r2 = ((i[0] & 0b01111100) >> 2)
+
+        imm = i[0] & 0b1111111
+
+#        print 'opcode =', opcode, self.ops[opcode]
+        cond_flag = (self.regs['fr'] & 0xfe) == 1
+        if cond_flag:
+            print 'has cond flag'
+        if self.ops.has_key(opcode):
+            if cond and not cond_flag:
+                self.ops[opcode](r1, r2, imm)
+            elif cond and cond_flag:
+                print 'SKIPPING'
+                exit(1)
+                self.regs['pc'] += 2
+            elif not cond:
+                self.ops[opcode](r1, r2, imm)
+        else:
+            # TODO: invalid opcode EXCEPTION
+            pass
+
+    def make_step(self):
+        i = self.fetch_instruction(self.regs['pc'])
+#        print i
+        self.execute_instruction(i)
+
+    def show(self):
+        print self.regs
+
+
+class MMU(object):
+    def __init__(self, mem):
+        self.cpus = []
+        self.mem = mem
+
+        self.cnt = 0
+
+        self.mappings = {0xffffffff-1*4: (self.ld_cpu_id, self.st_nothing),
+                         0xffffffff-2*4: (self.ld_nothing, self.st_halt),
+                         0xffffffff-3*4: (self.ld_counter, self.st_counter),
+                         0xffffffff-4*4: (self.ld_nothing, self.st_console),
+                        }
+
+    def add_cpu(self, cpu):
+        self.cpus.append(cpu)
+
+    def add_io(self, dev, address):
+        self.mappings[address] = (dev.cb_read, dev.cb_write)
+
+
+    def ld_cpu_id(self, addr, size):
+        print 'LD CPU ID'
+        return map(ord, 'P1P3')
+
+    def st_halt(self, addr, val, size):
+        if val == reduce(lambda a,b: (a << 8) | b, map(ord, 'h@L7')):
+            print 'got HALT command. exit.'
+            exit(0)
+
+        print 'HALT got', hex(val), 'and wants', hex(reduce(lambda a,b: (a << 8) | b, map(ord, 'h@L7'))) , '. continue', 
+
+    def st_counter(self, addr, val, size):
+        self.cnt += 1
+        print 'COUNT =', self.cnt
+
+    def ld_counter(self, addr, s):
+        return [0]*size
+
+    def st_console(self, addr, val, size):
+        sys.stdout.write(chr(val & 0xff))
+        sys.stdout.flush()
+
+    def ld_nothing(self, a, size):
+        return [0]*size
+
+    def st_nothing(self, a, v, size):
+        pass
+
+    def read(self, addr, size):
+        if addr in self.mappings.keys():
+            return self.mappings[addr][0](addr, size)
+
+        return [self.mem[addr+i] for i in xrange(size)]
+
+    def write32(self, addr, value):
+        if addr in self.mappings.keys():
+            self.mappings[addr][1](addr, value, 4)
+
+        self.mem[addr] = value & 0xffffffff
+
+class Memory(object):
+    def __init__(self, size=MEMSIZE):
+        self.mem = [0]*size
+        self.ln = size
+
+    def __getitem__(self, i):
+        return self.mem[i % self.ln]
+
+    def __setitem__(self, i, v):
+        self.mem[i % self.ln] = v
+
+    def load_file(self, filename):
+        with open(filename, 'rb') as fin:
+            self.mem = map(ord, fin.read())
+            print "mem size=", len(self.mem)
+            self.mem += [0]*(self.ln-len(self.mem))
+            print "mem size=", len(self.mem)
+            #self.ln = len(self.mem)
+            sleep(1)
+
+    def __len__(self):
+        return self.ln #len(self.mem)
+
+class NetAdapter(object):
+    def __init__(self):
+        from pytun import TunTapDevice
+        self.dev = TunTapDevice(name='pipeemu')
+
+    def cb_write(self, addr, val, size):
+        pass
+
+    def cb_read(self, addr, size):
+        pass
+
+class IntControl(object):
+    def __init__(self):
+        self.int_table = {}
+
+    def cb_write(self, addr, val, size):
+        pass
+
+    def cb_read(self, addr, size):
+        pass
+
+    def invoke_hw_int(self, idx):
+        self.int_table[idx] #TODO int table
+
+        pass
+
+class Machine(object):
+    def __init__(self):
+        self.mem = Memory(size=1024*1024)
+        self.mmu = MMU(self.mem)
+        self.cpu = CPU(self.mmu)
+        self.mmu.add_io(NetAdapter(), 0xffff6666)
+        self.intctr = IntControl()
+        self.mmu.add_io(self.intctr, 0xeeee0000)
+        self.mmu.add_io(self.intctr, 0xeeee0004)
+        self.mmu.add_io(self.intctr, 0xeeee0008)
+        self.mmu.add_io(self.intctr, 0xeeee000c)
+
+    def load(self, filename):
+        self.mem.load_file(filename)
+
+    def run(self):
+        while(True):
+            self.cpu.make_step()
+#            self.cpu.show()
+#            sleep(0.01)
+
+if __name__ == '__main__':
+    m = Machine()
+    m.load(sys.argv[1])
+    m.run()
