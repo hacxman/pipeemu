@@ -3,6 +3,8 @@ import sys
 import os
 from time import sleep
 from collections import namedtuple
+import struct
+import threading
 
 MEMSIZE = 1024 * 1024 * 1
 
@@ -11,18 +13,24 @@ MEMSIZE = 1024 * 1024 * 1
 #    wololo = dict([ (dz, 0) for dz in rit])
 #    print wololo
 
+ExecdIntr = namedtuple("ExecdIntr", "int cpu")
+
 class Regfile(object):
     def __init__(self, *k):
-        self.regnames = 'r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 r16 r17 r18 r19 r20 r21 r22 r23 r24 r25 r26 fr sp lr pc zero'.split(' ')
+        self.regnames = 'r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 r16 r17 r18 r19 r20 r21 r22 r23 r24 four mfour fr sp lr pc zero'.split(' ')
         self.r = dict([ (dz, 0) for dz in self.regnames])
 
     def __getitem__(self, i):
+        if i in ['zero', 31, 'four', 'mfour', 26, 25]:
+            return {'zero': 0, 31: 0, 'four': 4, 25: 4, 'mfour':-4, 26:-4}[i]
         if type(i) is int:
             return self.r[self.regnames[i]]
         else:
             return self.r[i]
 
     def __setitem__(self, i, v):
+        if i in ['zero', 31, 'four', 'mfour', 26, 25]:
+            return
         if type(i) is int:
             self.r[self.regnames[i]] = v
 #            self.r[self.r.keys()[i]] = v
@@ -30,13 +38,14 @@ class Regfile(object):
             self.r[i] = v
 
     def __repr__(self):
-        return '{'+','.join(["'"+rn+"': " + hex(self.r[rn]) for rn in  self.regnames])+'}'
+        return '{'+','.join(["'"+rn+"': " + hex(self[rn]) for rn in  self.regnames])+'}'
 
 class CPU(object):
     def __init__(self, mmu):
         self.mmu = mmu
         mmu.add_cpu(self)
         self.regs = Regfile()
+        self.idx = 0
 
         self.ops = {0b000: self.sub_i,
                     0b001: self.mov_i,
@@ -48,16 +57,18 @@ class CPU(object):
                     0b111: self.nor_i}
 
     def fetch_instruction(self, addr):
-        return self.mmu.read(addr, 2)
+        return self.mmu.read_instruction(addr, 2, self.idx)
 
     def sub_i(self, r1, r2, imm):
-#        print 'sub', r1, r2
+        print 'sub r{}({}) r{}({})'.format(r1, self.regs[r1], r2, self.regs[r2], imm)
+        flg = imm & 0b01
         self.regs['pc'] += 2
         self.regs[r1] -= self.regs[r2]
-        if self.regs[r1] < 0:
-            self.regs['fr'] = self.regs['fr'] | 0b1
-        else:
-            self.regs['fr'] = self.regs['fr'] & 0xfffffffe
+        if not flg:
+            if self.regs[r1] < 0:
+                self.regs['fr'] = self.regs['fr'] | 0b1
+            else:
+                self.regs['fr'] = self.regs['fr'] & 0xfffffffe
 
 
     def mov_i(self, r1, r2, imm):
@@ -75,9 +86,9 @@ class CPU(object):
         self.regs[r1] = reduce(lambda a,b: (a << 8) | b, self.mmu.read(self.regs[r2], 4))
 
     def st_i(self, r1, r2, imm):
-#        print 'ST', hex(self.regs[r1])
+        print 'ST', hex(self.regs[r1])
         self.regs['pc'] += 2
-        self.mmu.write32(self.regs[r1], self.regs[r2] )
+        self.mmu.write32(self.regs[r1], self.regs[r2], self.idx )
 
     def shl_i(self, r1, r2, imm):
         self.regs['pc'] += 2
@@ -120,7 +131,7 @@ class CPU(object):
 
     def make_step(self):
         i = self.fetch_instruction(self.regs['pc'])
-#        print i
+        #print i
         self.execute_instruction(i)
 
     def show(self):
@@ -129,10 +140,13 @@ class CPU(object):
 
 class MMU(object):
     def __init__(self, mem):
-        self.cpus = []
+        self.cpus = {}
         self.mem = mem
 
         self.cnt = 0
+        self.intctrl = None
+
+        self.machine_off_cb = None
 
         self.mappings = {0xffffffff-1*4: (self.ld_cpu_id, self.st_nothing),
                          0xffffffff-2*4: (self.ld_nothing, self.st_halt),
@@ -140,52 +154,77 @@ class MMU(object):
                          0xffffffff-4*4: (self.ld_nothing, self.st_console),
                         }
 
+    def set_machine_off_cb(self, fun):
+        self.machine_off_cb = fun
+
     def add_cpu(self, cpu):
-        self.cpus.append(cpu)
+        idx = len(self.cpus)
+        self.cpus[idx] = cpu
+#        self.cpus.append(cpu)
 
     def add_io(self, dev, address):
         self.mappings[address] = (dev.cb_read, dev.cb_write)
 
+    def add_intctrl(self, dev):
+        self.intctrl = dev
 
-    def ld_cpu_id(self, addr, size):
+
+    def ld_cpu_id(self, addr, size, cpu):
         print 'LD CPU ID'
         return map(ord, 'P1P3')
 
-    def st_halt(self, addr, val, size):
+    def st_halt(self, addr, val, size, cpu):
         if val == reduce(lambda a,b: (a << 8) | b, map(ord, 'h@L7')):
             print 'got HALT command. exit.'
+            self.machine_off_cb()
             exit(0)
 
         print 'HALT got', hex(val), 'and wants', hex(reduce(lambda a,b: (a << 8) | b, map(ord, 'h@L7'))) , '. continue', 
 
-    def st_counter(self, addr, val, size):
+    def st_counter(self, addr, val, size, cpu):
         self.cnt += 1
-        print 'COUNT =', self.cnt
+    #    print 'COUNT =', self.cnt
 
-    def ld_counter(self, addr, s):
+    def ld_counter(self, addr, s, cpu):
         return [0]*size
 
-    def st_console(self, addr, val, size):
+    def st_console(self, addr, val, size, cpu):
         sys.stdout.write(chr(val & 0xff))
         sys.stdout.flush()
 
-    def ld_nothing(self, a, size):
+    def ld_nothing(self, a, size, cpu):
         return [0]*size
 
-    def st_nothing(self, a, v, size):
+    def st_nothing(self, a, v, size, cpu):
         pass
 
-    def read(self, addr, size):
-        if addr in self.mappings.keys():
-            return self.mappings[addr][0](addr, size)
-
+    def read_phys(self, addr, size):
         return [self.mem[addr+i] for i in xrange(size)]
 
-    def write32(self, addr, value):
+    def read(self, addr, size, cpu=None):
         if addr in self.mappings.keys():
-            self.mappings[addr][1](addr, value, 4)
+            return self.mappings[addr][0](addr, size, cpu)
+
+        return self.read_phys(addr, size) #[self.mem[addr+i] for i in xrange(size)]
+
+    def readjoin(self, addr, size):
+        return reduce(lambda a,b: (a << 8) | b, self.read_phys(addr, size))
+
+    def write32(self, addr, value, cpu=None):
+        if addr in self.mappings.keys():
+            self.mappings[addr][1](addr, value, 4, cpu)
 
         self.mem[addr] = value & 0xffffffff
+
+    def read_instruction(self, addr, size, cpu):
+        #print 'read insns @', addr, cpu
+        intr = self.intctrl.is_in_interrupt(cpu)
+        #print intr
+        if not intr:
+            return self.read(addr, size)
+        else:
+            return self.intctrl.next_interrupt_code(addr, cpu)
+
 
 class Memory(object):
     def __init__(self, size=MEMSIZE):
@@ -221,28 +260,143 @@ class NetAdapter(object):
     def cb_read(self, addr, size):
         pass
 
+INT_STARTING = 0
+INT_RUNNING = 1
+INT_STOPPING = 2
+
 class IntControl(object):
-    def __init__(self):
+    def __init__(self, mmu = None):
+        self.mmu = mmu
         self.int_table = {}
+        self.pending_interrupts = [] # int
+        self.executing_interrupts = {} # Cpuidx <-> (Int, State)
 
-    def cb_write(self, addr, val, size):
-        pass
+        self.phases = {INT_STARTING: self.int_cb_pusher,
+                       INT_RUNNING: self.int_cb_exec,
+                       INT_STOPPING: self.int_cb_popper}
 
-    def cb_read(self, addr, size):
+        self.off = True
+
+        with open('micro_pusher.bin', 'r') as fin:
+            self.ucode_pusher = map(ord, fin.read())
+
+        with open('micro_popper.bin', 'r') as fin:
+            self.ucode_popper = map(ord, fin.read())
+        print self.ucode_pusher
+
+    def assign_intr_to_cpu(self, intr, cpuidx):
+        self.executing_interrupts[cpuidx] = (intr, (INT_STARTING, 0)) # (intr, (phase name, phase))
+
+    def int_cb_pusher(self, addr, cpu):
+        prog = self.ucode_pusher
+        intidx = self.executing_interrupts[cpu][0]
+        idx = self.executing_interrupts[cpu][1][1]
+        insn = prog[idx:idx+2]
+        idx += 2
+        if idx >= len(prog):
+            i = self.executing_interrupts[cpu]
+            self.executing_interrupts[cpu] = (i[0], (INT_RUNNING, 0))
+            self.mmu.cpus[cpu].regs['pc'] = self.int_table[intidx]
+        else:
+            i = self.executing_interrupts[cpu]
+            self.executing_interrupts[cpu] = (i[0], (i[1][0], idx))
+        print 'pusher', self.executing_interrupts
+
+        return insn
+
+    def int_cb_exec(self, addr, cpu):
+#        intidx = self.executing_interrupts[cpu][0]
+#        baseaddr = self.int_table[intidx]
+        return self.mmu.read(addr, 2, cpu)
+
+    def int_cb_popper(self, addr, cpu):
+        prog = self.ucode_popper
+        intidx = self.executing_interrupts[cpu][0]
+        idx = self.executing_interrupts[cpu][1][1]
+        insn = prog[idx:idx+2]
+        idx += 2
+        if idx >= len(prog):
+            self.executing_interrupts.pop(cpu)
+        else:
+            i = self.executing_interrupts[cpu]
+            self.executing_interrupts[cpu] = (i[0], (i[1][0], idx))
+        print 'popper', self.executing_interrupts
+        return insn
+
+    def next_interrupt_code(self, addr, cpuidx):
+        phase_name = self.executing_interrupts[cpuidx][1][0]
+        print phase_name
+        return self.phases[phase_name](addr, cpuidx)
+
+    def is_in_interrupt(self, cpu):
+        if cpu in self.executing_interrupts:
+            return True
+        if  len(self.pending_interrupts) > 0:
+            print self.pending_interrupts
+            intr = self.pending_interrupts.pop()
+            self.assign_intr_to_cpu(intr, cpu)
+            return True
+
+        return False
+
+    def cb_write_jump_from_interrupt(self,  addr, val, size, cpu):
+        if cpu not in self.executing_interrupts:
+            print cpu, self.executing_interrupts, self.pending_interrupts
+            #self.pending_interrupts
+            # TODO, throw fault
+            self.pending_interrupts.append(1)
+            print 'PICA'
+            exit(0)
+            return
+
+
+        i = self.executing_interrupts[cpu]
+        self.executing_interrupts[cpu] = (i[0], (INT_STOPPING, 0))
+
+
+    def set_mmu(self, mmu):
+        self.mmu = mmu
+        self.mmu.add_io(self, 0xf00d0000)
+
+    def cb_write(self, addr, val, size, cpu):
+        if addr == 0xeeef0000:
+            self.off = False if val == 1 else True
+            if not self.off:
+                assert False
+
+        if addr == 0xf00d0000:
+            self.cb_write_jump_from_interrupt(addr, val, size, cpu)
+            print 'pizda', hex(val), val
+            #exit(3)
+        if addr >= 0xeeee0000 and addr <= 0xeeee0000+4*4:
+            print 'fyyy', hex(val), val
+            self.int_table[(addr-0xeeee0000)] = val
+#            exit(4)
+
+        
+
+    def cb_read(self, addr, size, cpu):
         pass
 
     def invoke_hw_int(self, idx):
-        self.int_table[idx] #TODO int table
-
-        pass
+        #self.int_table[idx] #TODO int table
+        #addr = self.mmu.readjoin(0xf00d0000, 4)
+        if not self.off:
+            self.pending_interrupts.append(idx)
 
 class Machine(object):
     def __init__(self):
+        self.running = True
         self.mem = Memory(size=1024*1024)
         self.mmu = MMU(self.mem)
+        self.mmu.set_machine_off_cb(self.machine_off_cb)
         self.cpu = CPU(self.mmu)
+
         self.mmu.add_io(NetAdapter(), 0xffff6666)
+
         self.intctr = IntControl()
+        self.intctr.set_mmu(self.mmu)
+        self.mmu.add_intctrl(self.intctr)
         self.mmu.add_io(self.intctr, 0xeeee0000)
         self.mmu.add_io(self.intctr, 0xeeee0004)
         self.mmu.add_io(self.intctr, 0xeeee0008)
@@ -251,11 +405,25 @@ class Machine(object):
     def load(self, filename):
         self.mem.load_file(filename)
 
+    def machine_off_cb(self):
+        self.running = False
+
+    def systick(self):
+        while self.running:
+            sleep(13)
+            self.intctr.invoke_hw_int(0)
+            print 'tick'
+            #self.running = False
+            #exit(1)
+
     def run(self):
-        while(True):
+        t = threading.Thread(target=self.systick)
+        t.start()
+        while(self.running):
             self.cpu.make_step()
-#            self.cpu.show()
-#            sleep(0.01)
+            self.cpu.show()
+            sleep(0.1)
+        t.join()
 
 if __name__ == '__main__':
     m = Machine()
