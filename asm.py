@@ -73,8 +73,9 @@ sub {r1} {r3}
 def main():
     fname = sys.argv[1]
 
-    r = dict([ (dz, i) for i, dz in enumerate('r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 r16 r17 r18 r19 r20 r21 r22 r23 r24 r25 r26 r27 sp lr pc zero'.split(' '))])
+    r = dict([ (dz, i) for i, dz in enumerate('r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 r16 r17 r18 r19 r20 r21 r22 r23 r24 r25 four mfour fr sp lr pc zero'.split(' '))])
     op = dict([ (dz, i) for i, dz in enumerate('sub mov br ld st shl rot nor csub cmov cbr cld cst cshl crot cnor'.split(' '))])
+    op.update({'subn':0, 'csubn': 8})
 #    print r
 #    print op
 
@@ -127,11 +128,12 @@ def main():
                         fout.write(line)
 
 
+    adr = 0
     with open(fname+'_pp') as fin:
         with open(os.path.splitext(fname)[0]+'.bin', 'w+') as fout:
             for lnum, line in enumerate(fin.readlines()):
                 tokens = line.split()
-                print tokens
+                print tokens, adr
                 
                 if len(tokens) > 0:
                     if tokens[0] in op.keys():
@@ -147,9 +149,15 @@ def main():
 
                             fout.write( chr(((r[tokens[1]] & 0b1) << 7) | (imm & 0b1111111) ) )
                             fout.write( chr((op[tokens[0]] << 4) | ((r[tokens[1]] & 0b11110) >> 1)) )
+                            adr += 2
+                        elif tokens[0] in ['subn', 'csubn']:
+                            fout.write( chr(((r[tokens[1]] & 0b1) << 7) | ((r[tokens[2]] & 0b11111) << 2) | 0b01) )
+                            fout.write( chr((op[tokens[0]] << 4) | ((r[tokens[1]] & 0b11110) >> 1)))
+                            adr += 2
                         else:
                             fout.write( chr(((r[tokens[1]] & 0b1) << 7) | ((r[tokens[2]] & 0b11111) << 2)) )
                             fout.write( chr((op[tokens[0]] << 4) | ((r[tokens[1]] & 0b11110) >> 1)) )
+                            adr += 2
                     elif tokens[0].startswith('#'):
                         pass
                     else:
