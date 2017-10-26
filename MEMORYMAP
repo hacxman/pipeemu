@@ -1,0 +1,28 @@
+Memory top:
+
+devspace: 0xa000 0000 - 0xffff ffff
+
+ADDRESS        DEV     LOAD          STORE
+0xffff fffb -  MMU     cpuid           -
+0xffff fff7 -  MMU       -           halt
+0xffff fff3 -  MMU     getcount      inccount
+0xffff ffef -  MMU       -           putc
+
+0xf00d 0000 -  INTC      -           intret
+0xeeef 0000 -  INTC      -           enable/disable int for given cpu
+0xeeee 0000 -  INTC    getvect       setvect
+0xeeee 0004 -  INTC    getvect       setvect
+0xeeee 0008 -  INTC    getvect       setvect
+0xeeee 0012 -  INTC    getvect       setvect
+
+
+device autoconfiguration and management
+0xe000 0000 -  DAAM     devcount        -
+0xe000 0004 -  
+
+INTERRUPT TABLE:
+offset:
+0x0000      -  systick
+0x0004      -  
+0x0008      -
+0x000c
