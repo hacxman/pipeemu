@@ -25,8 +25,8 @@ ld r23 sp
 subn sp mfour
 ld r24 sp
 subn sp mfour
-ld fr sp
-subn sp mfour
 ld lr sp
+subn sp mfour
+ld fr sp
 subn sp mfour
 ld pc sp
