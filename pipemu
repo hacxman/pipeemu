@@ -38,7 +38,8 @@ class Regfile(object):
             self.r[i] = v
 
     def __repr__(self):
-        return '{'+','.join(["'"+rn+"': " + hex(self[rn]) for rn in  self.regnames])+'}'
+        return '{'+','.join(["'"+rn+"': " + hex(self[rn]) for rn in  self.regnames[:16]])+'\n' \
+               +'{'+','.join(["'"+rn+"': " + hex(self[rn]) for rn in  self.regnames[16:]])+'}'
 
 class CPU(object):
     def __init__(self, mmu):
@@ -60,7 +61,7 @@ class CPU(object):
         return self.mmu.read_instruction(addr, 2, self.idx)
 
     def sub_i(self, r1, r2, imm):
-        print 'sub r{}({}) r{}({})'.format(r1, self.regs[r1], r2, self.regs[r2], imm)
+        #print 'sub r{}({}) r{}({})'.format(r1, self.regs[r1], r2, self.regs[r2], imm)
         flg = imm & 0b01
         self.regs['pc'] += 2
         self.regs[r1] -= self.regs[r2]
@@ -69,37 +70,46 @@ class CPU(object):
                 self.regs['fr'] = self.regs['fr'] | 0b1
             else:
                 self.regs['fr'] = self.regs['fr'] & 0xfffffffe
+        else:
+            print "SUBN"
 
 
     def mov_i(self, r1, r2, imm):
+        print 'mov', r1, imm
         # TODO: make register name <-> id lookup function
         self.regs['pc'] += 2
         self.regs[r1] = imm
 
     def br_i(self, r1, r2, imm):
+        print 'br', r1, r2
         self.regs['lr'] = self.regs['pc']
         self.regs['pc'] = self.regs[r1]
-        print 'branching to', self.regs['pc']
+        print 'branching to', hex(self.regs['pc'])
 
     def ld_i(self, r1, r2, imm):
+        #print 'ld', r1, r2
         self.regs['pc'] += 2
         self.regs[r1] = reduce(lambda a,b: (a << 8) | b, self.mmu.read(self.regs[r2], 4))
 
     def st_i(self, r1, r2, imm):
-        print 'ST', hex(self.regs[r1])
+        print 'st r{} r{}({})'.format(r1, r2, hex(self.regs[r2]))
+        #print 'ST', hex(self.regs[r1])
         self.regs['pc'] += 2
         self.mmu.write32(self.regs[r1], self.regs[r2], self.idx )
 
     def shl_i(self, r1, r2, imm):
+        #print 'shl', r1, r2
         self.regs['pc'] += 2
         self.regs[r1] = (self.regs[r1] << self.regs[r2]) & 0xffffffff
 
     def rot_i(self, r1, r2, imm):
+        #print 'rot', r1, r2
         self.regs['pc'] += 2
         # FIXME
         self.regs[r1] = (self.regs[r1] << self.regs[r2]) & 0xffffffff
 
     def nor_i(self, r1, r2, imm):
+        #print 'nor', r1, r2
         self.regs['pc'] += 2
         self.regs[r1] = (~(self.regs[r1] | self.regs[r2])) & 0xffffffff
 
@@ -183,7 +193,7 @@ class MMU(object):
 
     def st_counter(self, addr, val, size, cpu):
         self.cnt += 1
-    #    print 'COUNT =', self.cnt
+        print 'COUNT =', self.cnt
 
     def ld_counter(self, addr, s, cpu):
         return [0]*size
@@ -225,7 +235,6 @@ class MMU(object):
         else:
             return self.intctrl.next_interrupt_code(addr, cpu)
 
-
 class Memory(object):
     def __init__(self, size=MEMSIZE):
         self.mem = [0]*size
@@ -260,6 +269,38 @@ class NetAdapter(object):
     def cb_read(self, addr, size):
         pass
 
+class Terminal(object):
+    def __init__(self):
+        import pty
+        self.master, self.slave = pty.openpty()
+        self.inbuf = []
+        self.outbuf = []
+
+        t = threading.Thread(target=self.run)
+        t.start()
+
+    def cb_write(self, addr, val, size):
+        self.inbuf.append(val)
+
+    def cb_read(self, addr, size):
+        return self.outbuf.pop()
+
+    def run(self):
+        while True:
+            rl, wl, xl = pty.select([self.master], [self.master], [self.master])
+            for fd in xl:
+                exit(0)
+
+            for fd in rl:
+                self.outbuf.append(os.read(fd, 1))
+                # TODO: signalize interrupt
+
+            for fd in wl:
+                if len(self.inbuf) > 0:
+                    os.write(fd, self.inbuf.pop())
+                #os.write(fd, 'penis')
+
+
 INT_STARTING = 0
 INT_RUNNING = 1
 INT_STOPPING = 2
@@ -275,13 +316,20 @@ class IntControl(object):
                        INT_RUNNING: self.int_cb_exec,
                        INT_STOPPING: self.int_cb_popper}
 
-        self.off = True
+        self.off = False
 
-        with open('micro_pusher.bin', 'r') as fin:
-            self.ucode_pusher = map(ord, fin.read())
+        import asm
+        with open('micro_pusher.asm', 'r') as fin:
+            self.ucode_pusher = map(ord, asm.translate('micro_pusher', fin.readlines()))
 
-        with open('micro_popper.bin', 'r') as fin:
-            self.ucode_popper = map(ord, fin.read())
+        with open('micro_popper.asm', 'r') as fin:
+            self.ucode_popper = map(ord, asm.translate('micro_popper', fin.readlines()))
+
+#        with open('micro_pusher.bin', 'r') as fin:
+#            self.ucode_pusher = map(ord, fin.read())
+
+#        with open('micro_popper.bin', 'r') as fin:
+#            self.ucode_popper = map(ord, fin.read())
         print self.ucode_pusher
 
     def assign_intr_to_cpu(self, intr, cpuidx):
@@ -344,9 +392,9 @@ class IntControl(object):
             print cpu, self.executing_interrupts, self.pending_interrupts
             #self.pending_interrupts
             # TODO, throw fault
-            self.pending_interrupts.append(1)
-            print 'PICA'
-            exit(0)
+            #self.pending_interrupts.append(1)
+            print 'PICA # TODO, throw fault'
+            #exit(0)
             return
 
 
@@ -369,11 +417,10 @@ class IntControl(object):
             print 'pizda', hex(val), val
             #exit(3)
         if addr >= 0xeeee0000 and addr <= 0xeeee0000+4*4:
-            print 'fyyy', hex(val), val
+            print 'fyyy val:{} {}'.format(hex(val), val)
             self.int_table[(addr-0xeeee0000)] = val
+            print self.int_table
 #            exit(4)
-
-        
 
     def cb_read(self, addr, size, cpu):
         pass
@@ -422,7 +469,7 @@ class Machine(object):
         while(self.running):
             self.cpu.make_step()
             self.cpu.show()
-            sleep(0.1)
+            sleep(0.001)
         t.join()
 
 if __name__ == '__main__':
