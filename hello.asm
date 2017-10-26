@@ -1,11 +1,13 @@
 put r2 0xeeee0000 r3 r4
-mov r1 308
+put r1 0x000001f2 r3 r4
+#mov r1 308
 st r2 r1
 put sp 0x000e0000 r3 r4
 put r1 0xeeef0000 r3 r4
 mov r2 1
 st r1 r2
-mov r1 302
+#mov r1 302
+put r1 0x000001f0 r3 r4
 br r1 r10
 mov r17 10
 mov r1 'H'
